@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Magizh's Cloud</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f5f7fb;color:#172033}
+header{padding:18px 20px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between;gap:12px}
+h1{margin:0;font-size:22px}.sub{color:#667085;font-size:13px;margin-top:3px}
+button,input{font:inherit}button{border:0;border-radius:9px;padding:9px 13px;cursor:pointer;background:#2563eb;color:#fff}button.secondary{background:#eef2f7;color:#172033}button.danger{background:#dc2626}
+main{max-width:1100px;margin:22px auto;padding:0 16px}.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+input{padding:9px 11px;border:1px solid #d7dce5;border-radius:9px;background:#fff;min-width:220px}.crumb{margin:12px 0;color:#667085}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden}
+.row{display:grid;grid-template-columns:1fr 150px 180px 260px;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid #edf0f4}
+.row:last-child{border-bottom:0}.head{font-size:12px;color:#667085;background:#fafbfc}.name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#667085}
+.actions{display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap}.actions button{padding:6px 8px;font-size:12px}
+.folder{color:#1d4ed8}.status{margin:10px 0;color:#667085;font-size:13px}.hidden{display:none}
+@media(max-width:800px){.row{grid-template-columns:1fr}.head{display:none}.actions{justify-content:flex-start}}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>☁️ Magizh's Cloud</h1><div class="sub">Google Drive file manager</div></div>
+  <div>
+    <button id="loginBtn" onclick="signIn()">Sign in with Google</button>
+    <button id="logoutBtn" class="secondary hidden" onclick="signOut()">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <button onclick="goHome()">🏠 Home</button>
+    <button class="secondary" onclick="goUp()">⬆️ Up</button>
+    <button onclick="newFolder()">📁 New folder</button>
+    <button onclick="document.getElementById('upload').click()">⬆️ Upload</button>
+    <input id="upload" type="file" multiple class="hidden" onchange="uploadFiles(this.files)">
+    <input id="search" placeholder="Search this folder..." oninput="filterRows()">
+  </div>
+  <div id="crumb" class="crumb">Magizh's Cloud</div>
+  <div id="status" class="status">Add your Google OAuth Client ID and API key in this file, then sign in.</div>
+  <div class="card">
+    <div class="row head"><div>Name</div><div>Type</div><div>Modified</div><div>Actions</div></div>
+    <div id="files"></div>
+  </div>
+</main>
+
+<script src="https://apis.google.com/js/api.js"></script>
+<script src="https://accounts.google.com/gsi/client"></script>
+<script>
+/*
+  MAGIZH'S CLOUD
+  --------------
+  1. Put your Google OAuth Web Client ID below.
+  2. Put your Google API key below.
+  3. Enable Google Drive API for the Google Cloud project.
+  4. Add the website's origin (for example http://localhost:8000)
+     to Authorized JavaScript origins for the OAuth client.
+*/
+const CLIENT_ID = "991419846072-momod2s0borl6apf4gkl1vi81r2e26kg.apps.googleusercontent.com";
+// No API key is needed in this version.
+
+/* Your folder */
+const ROOT_FOLDER_ID = "1a392gFZwKsX3DYxLByICPbqh0QcaC5fV";
+const ROOT_NAME = "Magizh's Cloud";
+
+const DISCOVERY = ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"];
+const SCOPE = "https://www.googleapis.com/auth/drive";
+
+let tokenClient, accessToken = null, currentFolder = ROOT_FOLDER_ID;
+let folderStack = [{id:ROOT_FOLDER_ID,name:ROOT_NAME}];
+let allFiles = [];
+
+function status(t){document.getElementById("status").textContent=t}
+function readyConfig(){return !CLIENT_ID.startsWith("YOUR_")}
+
+window.addEventListener("load", async ()=>{
+  if(!readyConfig()) return;
+  try{
+tokenClient=google.accounts.oauth2.initTokenClient({
+      client_id:CLIENT_ID,scope:SCOPE,
+      callback: async r=>{
+        if(r.error){status("Google sign-in failed: "+r.error);return}
+        accessToken=r.access_token;
+        document.getElementById("loginBtn").classList.add("hidden");
+        document.getElementById("logoutBtn").classList.remove("hidden");
+        await loadFolder();
+      }
+    });
+    status("Ready. Sign in to manage your cloud.");
+  }catch(e){status("Google API setup error: "+(e.message||e))}
+});
+
+function signIn(){
+  if(!readyConfig()){alert("Open this HTML file and set CLIENT_ID near the bottom if needed.");return}
+  if(!tokenClient){alert("Google sign-in is still loading. Try again in a moment.");return}
+  tokenClient.requestAccessToken({prompt:"consent"});
+}
+function signOut(){
+  if(accessToken) google.accounts.oauth2.revoke(accessToken,()=>{});
+  accessToken=null;
+  document.getElementById("loginBtn").classList.remove("hidden");
+  document.getElementById("logoutBtn").classList.add("hidden");
+  document.getElementById("files").innerHTML="";
+  status("Signed out.");
+}
+
+
+async function driveRequest(path, options = {}) {
+  if (!accessToken) throw new Error("Not signed in.");
+  const headers = new Headers(options.headers || {});
+  headers.set("Authorization", "Bearer " + accessToken);
+  if (options.body && typeof options.body === "object" && !(options.body instanceof Blob)) {
+    headers.set("Content-Type", "application/json");
+    options.body = JSON.stringify(options.body);
+  }
+  const res = await fetch("https://www.googleapis.com/drive/v3" + path, {...options, headers});
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch {}
+  if (!res.ok) throw new Error(data?.error?.message || `Google Drive error ${res.status}`);
+  return data;
+}
+
+async function loadFolder(){
+  try{
+    status("Loading...");
+    const q=encodeURIComponent(`'${currentFolder}' in parents and trashed=false`);
+    const fields=encodeURIComponent("files(id,name,mimeType,size,modifiedTime,webViewLink,webContentLink,parents,capabilities)");
+    const data=await driveRequest(`/files?q=${q}&fields=${fields}&orderBy=folder,name_natural&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+    allFiles=data.files||[];
+    renderFiles(allFiles);
+    document.getElementById("crumb").textContent=folderStack.map(x=>x.name).join(" / ");
+    status(`${allFiles.length} item(s)`);
+  }catch(e){status("Could not load folder: "+e.message)}
+}
+
+function renderFiles(files){
+  const box=document.getElementById("files");
+  box.innerHTML="";
+  if(!files.length){box.innerHTML='<div style="padding:25px;text-align:center;color:#667085">This folder is empty.</div>';return}
+  files.forEach(f=>{
+    const r=document.createElement("div");r.className="row file-row";r.dataset.name=f.name.toLowerCase();
+    const isFolder=f.mimeType==="application/vnd.google-apps.folder";
+    r.innerHTML=`
+      <div class="name ${isFolder?"folder":""}" title="${esc(f.name)}">${isFolder?"📁":"📄"} ${esc(f.name)}</div>
+      <div class="meta">${isFolder?"Folder":mimeLabel(f.mimeType)}</div>
+      <div class="meta">${new Date(f.modifiedTime).toLocaleString()}</div>
+      <div class="actions">
+        ${isFolder?`<button onclick="openFolder('${f.id}',${JSON.stringify(f.name)})">Open</button>`:""}
+        <button class="secondary" onclick="renameFile('${f.id}',${JSON.stringify(f.name)})">Rename</button>
+        <button class="secondary" onclick="moveFile('${f.id}',${JSON.stringify(f.name)})">Move</button>
+        <button class="secondary" onclick="downloadFile('${f.id}',${JSON.stringify(f.name)},${JSON.stringify(f.mimeType)},${JSON.stringify(f.webViewLink||"")})">Open</button>
+        <button class="danger" onclick="deleteFile('${f.id}',${JSON.stringify(f.name)})">Delete</button>
+      </div>`;
+    box.appendChild(r);
+  });
+}
+function filterRows(){
+  const q=document.getElementById("search").value.toLowerCase();
+  document.querySelectorAll(".file-row").forEach(r=>r.style.display=r.dataset.name.includes(q)?"":"none");
+}
+function openFolder(id,name){folderStack.push({id,name});currentFolder=id;loadFolder()}
+function goHome(){folderStack=[{id:ROOT_FOLDER_ID,name:ROOT_NAME}];currentFolder=ROOT_FOLDER_ID;loadFolder()}
+function goUp(){if(folderStack.length>1){folderStack.pop();currentFolder=folderStack.at(-1).id;loadFolder()}}
+
+async function newFolder(){
+  const name=prompt("New folder name:");
+  if(!name?.trim())return;
+  try{
+    status("Creating folder...");
+    await driveRequest("/files",{method:"POST",body:{
+      name:name.trim(),mimeType:"application/vnd.google-apps.folder",parents:[currentFolder]
+    }});
+    await loadFolder();
+  }catch(e){alert("Could not create folder:
+"+e.message)}
+}
+async function renameFile(id,old){
+  const name=prompt("New name:",old);
+  if(!name||name===old)return;
+  try{
+    status("Renaming...");
+    await driveRequest(`/files/${encodeURIComponent(id)}?supportsAllDrives=true`,{
+      method:"PATCH",body:{name:name.trim()}
+    });
+    await loadFolder();
+  }catch(e){alert("Could not rename:
+"+e.message)}
+}
+async function deleteFile(id,name){
+  if(!confirm(`Move "${name}" to Trash?`))return;
+  try{
+    status("Moving to Trash...");
+    await driveRequest(`/files/${encodeURIComponent(id)}?supportsAllDrives=true`,{
+      method:"PATCH",body:{trashed:true}
+    });
+    await loadFolder();
+  }catch(e){alert("Could not delete:
+"+e.message)}
+}
+async function moveFile(id,name){
+  try{
+    status("Loading destination folders...");
+    const q=encodeURIComponent("mimeType='application/vnd.google-apps.folder' and trashed=false");
+    const fields=encodeURIComponent("files(id,name,parents)");
+    const data=await driveRequest(`/files?q=${q}&fields=${fields}&orderBy=name_natural&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+    const folders=[{id:"root",name:"My Drive"}].concat(data.files||[]);
+    const answer=prompt(`Move "${name}" to which folder?
+
+`+folders.map((f,i)=>`${i}: ${f.name}`).join("
+")+`
+
+Enter the folder number:`);
+    if(answer===null)return;
+    const index=Number(answer);
+    if(!Number.isInteger(index)||!folders[index]){alert("Invalid folder number.");return}
+    const target=folders[index];
+    const file=await driveRequest(`/files/${encodeURIComponent(id)}?fields=parents&supportsAllDrives=true`);
+    const oldParents=(file.parents||[]).join(",");
+    if(oldParents.split(",").includes(target.id)){status("Already in that folder.");return}
+    let url=`/files/${encodeURIComponent(id)}?addParents=${encodeURIComponent(target.id)}&fields=id,parents&supportsAllDrives=true`;
+    if(oldParents)url+=`&removeParents=${encodeURIComponent(oldParents)}`;
+    status("Moving...");
+    await driveRequest(url,{method:"PATCH"});
+    await loadFolder();
+  }catch(e){alert("Could not move:
+"+e.message)}
+}
+
+async function uploadFiles(files){
+  if(!files.length)return;
+  if(!accessToken){alert("Sign in first.");return}
+  for(const file of files){
+    try{status("Uploading "+file.name+"...");
+      const boundary="drive_boundary_"+Date.now()+"_"+Math.random().toString(16).slice(2);
+      const metadata={name:file.name,parents:[currentFolder]};
+      const body=new Blob([
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+        JSON.stringify(metadata),`\r\n--${boundary}\r\n`,
+        `Content-Type: ${file.type||"application/octet-stream"}\r\n\r\n`,
+        file,`\r\n--${boundary}--`
+      ]);
+      const res=await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name",{
+        method:"POST",
+        headers:{Authorization:"Bearer "+accessToken,"Content-Type":`multipart/related; boundary=${boundary}`},
+        body
+      });
+      if(!res.ok)throw new Error(await res.text());
+    }catch(e){alert("Upload failed for "+file.name+": "+err(e))}
+  }
+  document.getElementById("upload").value="";
+  loadFolder();
+}
+async function downloadFile(id,name,mime,viewLink){
+  if(mime.startsWith("application/vnd.google-apps.")){
+    if(viewLink)window.open(viewLink,"_blank");
+    else window.open(`https://drive.google.com/open?id=${id}`,"_blank");
+    return;
+  }
+  try{
+    status("Preparing "+name+"...");
+    const res=await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`,{
+      headers:{Authorization:"Bearer "+accessToken}
+    });
+    if(!res.ok)throw new Error(await res.text());
+    const blob=await res.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();
+    URL.revokeObjectURL(url);status("Ready.");
+  }catch(e){
+    if(viewLink)window.open(viewLink,"_blank");
+    else alert("Could not open/download: "+err(e));
+  }
+}
+function mimeLabel(m){
+  if(m==="application/pdf")return"PDF";
+  if(m.startsWith("image/"))return"Image";
+  if(m.startsWith("video/"))return"Video";
+  if(m.startsWith("audio/"))return"Audio";
+  if(m==="text/plain")return"Text";
+  return m.split("/").pop();
+}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function err(e){return e?.result?.error?.message||e?.message||String(e)}
+</script>
+</body>
+</html>
